@@ -21,3 +21,6 @@ Usage
 import cv2
 from standardDetector import *
 standard = findStandard(cv2.imread('file.jpg'))
+
+Alternatively run standardDetector.py as a standalone python file with the included jpg files.
+Note that the included jpeg files have been edited to remove the other colour standard as the sheet of paper has two standards on it.
