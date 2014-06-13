@@ -9,6 +9,13 @@ It WILL fail when there are more than one standard in the picture.
 It is fairly robust to even partially  covered or irregularly shaped standards to a small extent. 
 Running this module by itself will find the standard for all jpg files in the same folder and save them to disk in the same folder
 
+Requirements
+===============================
+Python 2.7+
+OpenCV 2.4+
+Numpy 1.8+
+
+
 Usage
 ==================
 import cv2
