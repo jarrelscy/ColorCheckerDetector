@@ -1,7 +1,7 @@
 ColorCheckerDetector
 ====================
 
-This python module implements a function 'findStandard' that takes an OpenCV RGB image and outputs a projection of a Macbeth 6x4 color checker. 
+This python module automatically detects the position and orientation of a Macbeth 6x4 color checker. It implements a function 'findStandard' that takes an OpenCV RGB image and outputs a projection of a Macbeth 6x4 color checker. 
 
 findStandard takes one argument (the image) and outputs a projection of the standard. 
 It will run fairly slowly for large images at 6MP or higher. If the downsample flag is set to true it will downsample to X pixel width of 2000
