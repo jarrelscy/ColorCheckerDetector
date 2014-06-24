@@ -3,6 +3,9 @@ import numpy as numpy
 from operator import itemgetter
 import math
 from copy import deepcopy
+from multiprocessing import Pool, Array, RawArray
+import ctypes
+import standardDetector
 '''
 This module implements a function called findStandard which works on cv2 images of 3 colors
 findStandard takes one argument (the image) and outputs a projection of the standard. 
@@ -11,6 +14,7 @@ It WILL fail when there are more than one standard in the picture.
 It is fairly robust to even partially  covered or irregularly shaped standards to a small extent. 
 Running this module by itself will find the standard for all jpg files in the same folder and save them to disk in the same folder
 '''
+HIGH_MEMORY = True #this option enables multiprocessing to speed things up 
 MIN_DIST = 10 #beyond this dist two squares are not considered to be the same square
 MAX_VECTERROR = 0.97 #cos theta > 0.9 where theta is the angle between the vectors
 MAX_NORMALIZED_PERIMETER_ERROR = 0.4
@@ -47,7 +51,7 @@ standardColors = numpy.array(
         [ 45, 123, 220],
         [147,  62,  43],
         [240, 245, 245]]]).astype(numpy.uint8)
-labStandardColors = cv2.cvtColor(standardColors, cv2.COLOR_BGR2LAB).astype(numpy.float64)
+labStandardColors = cv2.cvtColor(standardColors, cv2.COLOR_BGR2LAB).astype(numpy.float32)
 labRotated = []
 for i in range(0,4):
     labRotated.append(numpy.rot90(labStandardColors,-i))
@@ -123,7 +127,15 @@ def projectAonB(A, B):
     dist = numpy.sqrt(B[1]*B[1] + B[0]*B[0])
     return (A[1]*B[1] + A[0]*B[0]) / dist
 colorYield = numpy.zeros((6,4))
+def calcDistance((labColor, shape)):
+    print labColor
+    sharedlabimg = numpy.frombuffer(standardDetector.sharedlabimg_base.get_obj(), dtype=numpy.float32)
+    sharedlabimg = sharedlabimg.reshape(shape)
+    return numpy.linalg.norm(sharedlabimg-labColor, axis=2)
+def initProcess(share):
+    standardDetector.sharedlabimg_base = share
 def findStandard(img, downSample=False):
+    print 'Downsample'
     if downSample:
         
         s = img.shape        
@@ -132,7 +144,7 @@ def findStandard(img, downSample=False):
    
     total = numpy.zeros(img.shape).astype(numpy.uint8)
     
-    labimg = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(numpy.float64)
+    labimg = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(numpy.float32)
     
     thresh = 200
     margin = 0.2 #black in between line on the standard is roughly 0.2 of the square width
@@ -146,49 +158,83 @@ def findStandard(img, downSample=False):
     horizontalOffsets = []
     verticalOffsets = []
     #for calculating orientation
-    
+    if HIGH_MEMORY:
+        
+        size = labimg.size
+        print labimg.size, labimg.shape
+        sharedlabimg_base = Array(ctypes.c_float, size)
+        p = Pool(initializer=initProcess,initargs=(sharedlabimg_base,))
+        sharedlabimg = numpy.frombuffer(sharedlabimg_base.get_obj(), dtype=numpy.float32)
+        sharedlabimg = sharedlabimg.reshape(labimg.shape)
+        print labimg.size, labimg.shape
+        print sharedlabimg.size, sharedlabimg.shape
+        sharedlabimg[:,:,:]=labimg[:,:,:]
+        '''
+        #test to see what sharedlabimg looks like after that
+        sharedlabimg = numpy.frombuffer(sharedlabimg_base.get_obj(), dtype=numpy.float32)
+        sharedlabimg = sharedlabimg.reshape(labimg.shape)
+        cv2.imshow('test2', labimg[::6,::6])
+        cv2.imshow('test', sharedlabimg[::6,::6])
+        if cv2.waitKey(0) == ord('q'):
+            quit()
+            '''
+            
+        nMap = p.map(calcDistance, [(c,labimg.shape) for c in labStandardColors.reshape((labStandardColors.shape[0]*labStandardColors.shape[1],labStandardColors.shape[2]))])
+        
+    #print 'Find squares of each color'
     for r, row in enumerate(standardColors):
-        for c, color in enumerate(row):
+        for c, color in enumerate(row):           
+            
             labColor = labStandardColors[r][c]
-            n = numpy.sqrt(numpy.square(labimg[:,:,0]-labColor[0])+numpy.square(labimg[:,:,2]-labColor[2])+numpy.square(labimg[:,:,1]-labColor[1]))
+            print 'Calculating color ', labColor
+            #print 'Calculate lab distance'
+            if not HIGH_MEMORY:
+                n = numpy.linalg.norm(labimg-labColor, axis=2)
+            else:
+                n = nMap[r*len(row)+c]
             n = n * 255 / n.max()
-            n = n.astype(numpy.uint8)    
-            copyn = numpy.copy(n)
+            n = n.astype(numpy.uint8)
+            #print 'Threshold'
             #n = cv2.adaptiveThreshold(n, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, int(n.shape[1]*0.02) | 1, 6)
             ret, n = cv2.threshold(n, 50, 255, cv2.THRESH_BINARY_INV)
-            
+            #print 'Morphology'
             n = cv2.morphologyEx(n, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT,(3,3)))
             #cv2.imshow(str(i*4+c), cv2.resize(n, dsize=(0,0), fx=0.2, fy=0.2))                
+            #print 'Contours'
             contours,h = cv2.findContours(n, cv2.RETR_TREE , cv2.CHAIN_APPROX_SIMPLE )
             #sometimes findcontours doesn't reutnr numpy arrays            
             for i, contour in enumerate(contours):
                 contours[i] = numpy.array(contour)
             toDraw = []
             indices = []
+            #print 'Process contours'
             for i, contour in enumerate(contours):    
                 s = Square()
                 s, count = s.processContour(contour, i, contours, h)
                 if s:
                     contours[i] = s
-            curSquares = []
+            curSquares = []            
             for square in contours:
                 if isinstance(square, Square):                    
                     square.color = (int(color[0]), int(color[1]), int(color[2]))
                     curSquares.append(square)
             labels = numpy.zeros((img.shape[0], img.shape[1])).astype(numpy.uint8)               
-            means = []      
+            means = []     
+            #print 'Calculate LAB'
             for i in range(0,len(curSquares)):            
                 cv2.drawContours(labels, [curSquares[i].contour], -1, i+1, -1)
                 roi = cv2.boundingRect(curSquares[i].contour)                                
                 mean = cv2.mean(labimg[roi[1]:roi[1]+roi[3], roi[0]:roi[0]+roi[2]] , numpy.array(labels[roi[1]:roi[1]+roi[3], roi[0]:roi[0]+roi[2]] == i+1).astype(numpy.uint8))
                 
                 curSquares[i].labColor = (mean[0], mean[1], mean[2])
-                #print curSquares[i].labColor, numpy.linalg.norm(curSquares[i].labColor-labColor)
+                ##print curSquares[i].labColor, numpy.linalg.norm(curSquares[i].labColor-labColor)
                 #cv2.drawContours(total, [curSquares[i].contour], -1, (255,255,255), -1)
                 means.append((numpy.linalg.norm(curSquares[i].labColor-labColor), curSquares[i]))
+            
             means.sort(key=itemgetter(0), reverse=True)
             colorYield[r][c] += len(means)
-            #print r, c, colorYield[r][c]
+            ##print r, c, colorYield[r][c]
+            #print 'Add squares, calculate horizontal offsets and vertical offset'
             if len(means) > 0:                                
                 for mean in means:
                     square = mean[1]   
@@ -198,7 +244,7 @@ def findStandard(img, downSample=False):
                         if numpy.linalg.norm(anotherSquare.center-square.center) < MIN_DIST:
                             #too close!
                             fail = True
-                            #print 'Too close'
+                            ##print 'Too close'
                             break
                     if fail:
                         continue
@@ -232,7 +278,7 @@ def findStandard(img, downSample=False):
                     else:
                         #check to see which one we're closer to, 
                         swap = numpy.abs(horizontalOffset[0]*horizontalOffsets[0][0] + horizontalOffset[1]*horizontalOffsets[0][1]) < numpy.abs(verticalOffset[0]*horizontalOffsets[0][0] + verticalOffset[1]*horizontalOffsets[0][1])
-                        #print horizontalOffset[0]*horizontalOffsets[0][0] + horizontalOffset[1]*horizontalOffsets[0][1], verticalOffset[0]*horizontalOffsets[0][0] + verticalOffset[1]*horizontalOffsets[0][1], horizontalOffsets[0]
+                        ##print horizontalOffset[0]*horizontalOffsets[0][0] + horizontalOffset[1]*horizontalOffsets[0][1], verticalOffset[0]*horizontalOffsets[0][0] + verticalOffset[1]*horizontalOffsets[0][1], horizontalOffsets[0]
                         if swap:
                             horizontalOffsets.append(verticalOffset)
                             verticalOffsets.append(horizontalOffset)                            
@@ -247,34 +293,35 @@ def findStandard(img, downSample=False):
                         if projectAonB(verticalOffset, verticalOffsets[0]) < 0:
                             verticalOffset = -verticalOffset
                             verticalOffsets[-1] = -verticalOffsets[-1]
-                     
-                    #calculate estimated location of colorchecker
+            #print 'Done'         
+    #calculate estimated location of colorchecker
                     
                 
                     
                 
-    
+    #print 'Calculating offsets'
     horizontalOffsets = numpy.array(horizontalOffsets)
     verticalOffsets = numpy.array(verticalOffsets)
     h, v = numpy.mean(horizontalOffsets, axis=0), numpy.mean(verticalOffsets, axis=0)
     diagonalOffsetDistance = numpy.max(numpy.array([numpy.linalg.norm(h+v), numpy.linalg.norm(v-h)]))
-    #print h,v,diagonalOffsetDistance
+    ##print h,v,diagonalOffsetDistance
     averagePerimeter = numpy.mean(numpy.array([s.perimeter for s in squares]))
     averagePosition = numpy.mean(numpy.array([s.center for s in squares]), axis=0)
     cv2.circle(total, (int(averagePosition[0]), int(averagePosition[1])), 5, (255,128,255), 5)
     meanHO, meanVO = numpy.mean(horizontalOffsets, axis=0), numpy.mean(verticalOffsets, axis=0)
-    #print len(horizontalOffsets), len(verticalOffsets), len(squares)
+    ##print len(horizontalOffsets), len(verticalOffsets), len(squares)
     a = numpy.array([[horizontalOffsets[count], verticalOffsets[count], squares[count]] for count in range(0,len(squares)) if numpy.dot(horizontalOffsets[count],meanHO) / numpy.linalg.norm(horizontalOffsets[count]) / numpy.linalg.norm(meanHO)  > MAX_VECTERROR and numpy.dot(verticalOffsets[count],meanVO) / numpy.linalg.norm(verticalOffsets[count]) / numpy.linalg.norm(meanVO)  > MAX_VECTERROR and abs(squares[count].perimeter - averagePerimeter) / averagePerimeter < MAX_NORMALIZED_PERIMETER_ERROR and numpy.linalg.norm(averagePosition - squares[count].center) < MAX_NUMBER_SQUARES_FROM_MEAN * diagonalOffsetDistance])       
     if len(a) > 0:
         horizontalOffsets = a[:,0]
         verticalOffsets = a[:,1]
         squares = a[:,2]
         h, v = numpy.mean(horizontalOffsets, axis=0), numpy.mean(verticalOffsets, axis=0)
-        #print h, v
+        ##print h, v
         hx = h[0]
         hy = h[1]
         vx = v[0]
         vy = v[1]
+        
         basis = numpy.linalg.inv(numpy.matrix([[hx,vx], [hy,vy]]))
         for square in squares:     
             cv2.circle(total, (square.center[0], square.center[1]), 5, (255,255,255), 5)
@@ -304,7 +351,7 @@ def findStandard(img, downSample=False):
         totalXOff = 0
         totalYOff = 0
         for square in squares: 
-            #print square.gridX, square.gridY
+            ##print square.gridX, square.gridY
             square.gridX -= offsetX
             square.gridY -= offsetY    
         count = 0
@@ -314,6 +361,7 @@ def findStandard(img, downSample=False):
         besttsquares = None
         bestmaxX = 0
         bestmaxY = 0
+        #print 'Find corner squares, residuals and offsets'
         #smart finding of maxX and maxY givest best possible chance of finding fit
         while count < 4:
             minX = numpy.mean([square.gridX for square in squares if square.gridX >= count+0.5  and square.gridX <= count+1.5]) / (count+1)
@@ -334,7 +382,7 @@ def findStandard(img, downSample=False):
                 square.gridY = round(square.gridY/minY)                
                 gridX = int(square.gridX)
                 gridY = int(square.gridY)    
-                #print tx, ty, minX, minY, gridX, gridY                
+                ##print tx, ty, minX, minY, gridX, gridY                
                 if int(square.gridX) > maxX:
                     maxX = int(square.gridX)
                     totalXOff = tx
@@ -362,18 +410,18 @@ def findStandard(img, downSample=False):
                 besttsquares = tsquares
                 bestmaxX = maxX
                 bestmaxY = maxY
-            #print maxX, maxY, 'max'
+            ##print maxX, maxY, 'max'
         
         #compare to base case
         maxX = 0
         maxY = 0
         residuals = 0
-        
+        #print 'Find more residuals'
         tsquares = deepcopy(squares)
         for square in tsquares:    
             tx = square.gridX
             ty = square.gridY
-            #print tx,ty
+            ##print tx,ty
             residuals += abs(square.gridX-round(square.gridX)) + abs(square.gridY-round(square.gridY))
             square.gridX = round(square.gridX)
             square.gridY = round(square.gridY)
@@ -409,7 +457,7 @@ def findStandard(img, downSample=False):
         squares = besttsquares    
         maxX = bestmaxX
         maxY = bestmaxY
-        print 'finalmax', maxX, maxY        
+        #print 'Found final maxX and maxY'      
         if maxX != 0:
             ax = totalXOff / float(maxX)
         else:
@@ -420,13 +468,14 @@ def findStandard(img, downSample=False):
             ay = 1
         recalculatedHorizontalOffset = ax * h
         recalculatedVerticalOffset = ay * v
-        #print recalculatedHorizontalOffset, recalculatedVerticalOffset
+        ##print recalculatedHorizontalOffset, recalculatedVerticalOffset
         #connect them all 
         for square in squares:  
             for nsquare in squares:
                 if abs(nsquare.gridX-square.gridX)+abs(nsquare.gridY-square.gridY) == 1:
                     cv2.line(total, square.tupleCenter, nsquare.tupleCenter, 255, 5)
         #make fake squares
+        #print 'Make fake squares'
         for cy in range(-6,6):
             for cx in range(-6, 6):
                 if cy in squareDict and cx in squareDict[cy]:
@@ -442,8 +491,9 @@ def findStandard(img, downSample=False):
                         s.labColor = labimg[s.center[1], s.center[0]]
                         squareDict[cy][cx] = s
                         cv2.circle(total, (s.center[0], s.center[1]), 5, (255,255,255), 5)
-                        #print cx,cy, 'make'
+                        ##print cx,cy, 'make'
         possibilities = [] 
+        #print 'Check possibilities'
         for i, rotatedPossible in enumerate(labRotated):
             width = rotatedPossible.shape[1]
             height = rotatedPossible.shape[0]
@@ -461,20 +511,20 @@ def findStandard(img, downSample=False):
                                 terror += numpy.linalg.norm(square.labColor-labColor)                                   
                                 count += 1
                            
-                    #print terror, count, width, height, tmaxX, tmaxY, i, x, y
+                    ##print terror, count, width, height, tmaxX, tmaxY, i, x, y
                     possibilities.append([1/float(count), terror/float(count), (y,x,i)])
-            
-        possibilities.sort(key=itemgetter(0,1))
+        #print 'Find best possibilities'    
+        possibilities.sort(key=itemgetter(0,1))        
         rotMatrix = numpy.array([[0,-1],[1,0]])
         if len(possibilities) > 0:
             ans = possibilities[0][2]
             col = numpy.array([[0,0],[0,5],[3,5],[3,0]])
             regPoints = numpy.matrix(numpy.transpose(col))
-            #print numpy.linalg.matrix_power(rotMatrix, ans[2])            
+            ##print numpy.linalg.matrix_power(rotMatrix, ans[2])            
             regPoints = numpy.array(numpy.transpose(numpy.linalg.matrix_power(rotMatrix, ans[2])*regPoints))            
             regPoints[:,0] -= numpy.min(regPoints[:,0])
             regPoints[:,1] -= numpy.min(regPoints[:,1])
-            #print regPoints
+            ##print regPoints
             position = squares[0].center
             xoff = squares[0].gridX
             yoff = squares[0].gridY
