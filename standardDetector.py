@@ -59,7 +59,7 @@ labRotated = numpy.array(labRotated)
 class Square:
     def __init__(self):
         pass
-    def processContour(self, contour, index, contours, hierarchy):
+    def processContour(self, contour, index, contours, hierarchy, minWidth=30):
         self.works = False
         #takes in a contour from the image and processes it into a square
         #if contour is not a square then it will return False, num where num is the number of contours processed
@@ -75,8 +75,9 @@ class Square:
         for eps in range(2,20):
             contour = cv2.approxPolyDP(contour, float(eps), True)
             contour = cv2.approxPolyDP(contour, float(eps), True)
-        if not (cv2.isContourConvex(contour) and len(contour) == 4):
+        if not (cv2.isContourConvex(contour) and len(contour) == 4):           
             contours[index] = False
+
             return False, 1
         points = []
         dists = []
@@ -92,8 +93,15 @@ class Square:
         #make sure length of each side is roughly the same
         #make sure angles of each side is roughly parallel
         mean = numpy.mean(dists)
-        if not (numpy.abs(angles[2]-angles[0]) < 0.2 and numpy.abs(angles[3]-angles[1]) < 0.2 and abs(dists[0] - (dists[0]+dists[2])/2) + abs(dists[2] - (dists[0]+dists[2])/2) + abs(dists[1] - (dists[1]+dists[3])/2) + abs(dists[3] - (dists[1]+dists[3])/2)< 5.0 and abs((dists[1]+dists[3])/2 - (dists[0]+dists[2])/2)  < 30):
+        if not ((numpy.abs(angles[2]-angles[0]) < 0.2 or numpy.abs(angles[2]-numpy.pi-angles[0]) < 0.2 or numpy.abs(angles[2]+numpy.pi-angles[0]) < 0.2)
+        and (numpy.abs(angles[3]-angles[1]) < 0.2 or numpy.abs(angles[3]-numpy.pi-angles[1]) < 0.2 or numpy.abs(angles[3]+numpy.pi-angles[1]) < 0.2)
+        and abs(dists[0] - (dists[0]+dists[2])/2) 
+        + abs(dists[2] - (dists[0]+dists[2])/2) 
+        + abs(dists[1] - (dists[1]+dists[3])/2) 
+        + abs(dists[3] - (dists[1]+dists[3])/2)< 5.0 
+        and abs((dists[1]+dists[3])/2 - (dists[0]+dists[2])/2)  < 30):
             contours[index] = False
+            print dists
             return False, 1
         parentIndex = hierarchy[0][index][3]
         count = 0
@@ -107,10 +115,10 @@ class Square:
         self.gridX = 0
         self.gridY = 0
         self.center = numpy.mean(points, axis=0).astype(int)
-        self.tupleCenter = (self.center[0], self.center[1])
+        self.tupleCenter = (self.center[0], self.center[1])       
         while parentIndex > 0:
             if not isinstance(contours[parentIndex], bool) and not isinstance(contours[parentIndex],Square):                
-                truth, c = Square().processContour(contours[parentIndex], parentIndex, contours, hierarchy)
+                truth, c = Square().processContour(contours[parentIndex], parentIndex, contours, hierarchy, minWidth)
                 count += c
             if isinstance(contours[parentIndex],Square):
                 contours[index] = False
@@ -134,12 +142,12 @@ def calcDistance((labColor, shape)):
     return numpy.linalg.norm(sharedlabimg-labColor, axis=2)
 def initProcess(share):
     standardDetector.sharedlabimg_base = share
-def findStandard(img, downSample=False):
+def findStandard(img, downSample=True):
     print 'Downsample'
     if downSample:
         
         s = img.shape        
-        img = cv2.resize(img, (int(s[1] * 2000 / s[0]), 2000))
+        img = cv2.resize(img, (int(s[1] * 2560 / s[0]), 2560))
         
    
     total = numpy.zeros(img.shape).astype(numpy.uint8)
@@ -194,6 +202,7 @@ def findStandard(img, downSample=False):
                 n = nMap[r*len(row)+c]
             n = n * 255 / n.max()
             n = n.astype(numpy.uint8)
+            
             #print 'Threshold'
             #n = cv2.adaptiveThreshold(n, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, int(n.shape[1]*0.02) | 1, 6)
             ret, n = cv2.threshold(n, 50, 255, cv2.THRESH_BINARY_INV)
@@ -201,7 +210,7 @@ def findStandard(img, downSample=False):
             n = cv2.morphologyEx(n, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT,(3,3)))
             #cv2.imshow(str(i*4+c), cv2.resize(n, dsize=(0,0), fx=0.2, fy=0.2))                
             #print 'Contours'
-            contours,h = cv2.findContours(n, cv2.RETR_TREE , cv2.CHAIN_APPROX_SIMPLE )
+            contours,h = cv2.findContours(n, cv2.RETR_TREE , cv2.CHAIN_APPROX_SIMPLE )            
             #sometimes findcontours doesn't reutnr numpy arrays            
             for i, contour in enumerate(contours):
                 contours[i] = numpy.array(contour)
@@ -210,7 +219,7 @@ def findStandard(img, downSample=False):
             #print 'Process contours'
             for i, contour in enumerate(contours):    
                 s = Square()
-                s, count = s.processContour(contour, i, contours, h)
+                s, count = s.processContour(contour, i, contours, h, minWidth=(labimg.shape[1] / 100))
                 if s:
                     contours[i] = s
             curSquares = []            
@@ -571,6 +580,18 @@ def getRGBFromWarpedImage(img, spotsize=10):
             n = numpy.mean(numpy.mean(img[py-spotsize:py+spotsize,px-spotsize:px+spotsize], axis=0), axis=0)
             ret[y][x] = n
             
+    return ret
+def putRGBOnStandard(img, colors, spotsize=10):
+    '''
+    assume points are located at 50,150,250,350 etc
+    spotsize controls the sample size (square shape)
+    '''
+    ret = numpy.copy(img)
+    for y in range(0,6):
+        for x in range(0,4):
+            py = int((y+0.5)*100)
+            px = int((x+0.5)*100)
+            ret[py-spotsize:py+spotsize,px-spotsize:px+spotsize] = colors[y][x]    
     return ret
 if __name__ == '__main__':
     import os
